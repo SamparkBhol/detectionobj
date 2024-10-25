@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Interactive Object Detection Workshop</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tensorflow/4.13.0/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background: #1a1a1a;
+            color: white;
+            font-family: Arial, sans-serif;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            text-align: center;
+            color: #4CAF50;
+            margin-bottom: 30px;
+        }
+
+        .video-container {
+            position: relative;
+            margin: 20px auto;
+            width: 640px;
+            height: 480px;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 0 20px rgba(0,0,0,0.3);
+        }
+
+        #video {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        #canvas {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+        }
+
+        .controls {
+            width: 640px;
+            margin: 20px auto;
+            padding: 20px;
+            background: #333;
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.2);
+        }
+
+        .button-container {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+
+        button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+
+        button:hover {
+            background: #45a049;
+        }
+
+        button:disabled {
+            background: #666;
+            cursor: not-allowed;
+        }
+
+        .status {
+            margin: 10px 0;
+            padding: 10px;
+            background: #444;
+            border-radius: 5px;
+            text-align: center;
+        }
+
+        .detections {
+            margin-top: 10px;
+            padding: 10px;
+            background: #444;
+            border-radius: 5px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .detection-item {
+            margin: 5px 0;
+            padding: 8px;
+            background: #555;
+            border-radius: 3px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .confidence-high { border-left: 4px solid #4CAF50; }
+        .confidence-medium { border-left: 4px solid #FFC107; }
+        .confidence-low { border-left: 4px solid #F44336; }
+
+        .loading {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.9);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+
+        .loading-content {
+            text-align: center;
+            background: #333;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        }
+
+        .loading-text {
+            color: white;
+            font-size: 24px;
+            margin-bottom: 20px;
+        }
+
+        .progress {
+            width: 100%;
+            height: 10px;
+            background: #444;
+            border-radius: 5px;
+            overflow: hidden;
+        }
+
+        .progress-bar {
+            width: 0%;
+            height: 100%;
+            background: #4CAF50;
+            transition: width 0.3s;
+        }
+
+        .error-message {
+            color: #F44336;
+            margin-top: 10px;
+            padding: 10px;
+            background: rgba(244, 67, 54, 0.1);
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Interactive Object Detection Workshop</h1>
+        
+        <div class="video-container">
+            <video id="video" autoplay playsinline></video>
+            <canvas id="canvas"></canvas>
+        </div>
+
+        <div class="controls">
+            <div class="button-container">
+                <button id="startBtn" onclick="startDetection()" disabled>Start Detection</button>
+                <button id="switchCamera" onclick="switchCamera()">Switch Camera</button>
+                <button id="pauseBtn" onclick="togglePause()" disabled>Pause</button>
+            </div>
+            <div class="status" id="status">Initializing...</div>
+            <div class="detections" id="detectionsList"></div>
+        </div>
+    </div>
+
+    <div class="loading" id="loading">
+        <div class="loading-content">
+            <div class="loading-text">
+                Loading AI Model...
+                <br>
+                <span id="loadingStatus">Please wait...</span>
+            </div>
+            <div class="progress">
+                <div class="progress-bar" id="progressBar"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let model;
+        let video;
+        let canvas;
+        let ctx;
+        let isDetecting = false;
+        let isPaused = false;
+        let currentStream;
+        let currentCamera = 'environment';
+
+        // Initialize the camera
+        async function setupCamera() {
+            video = document.getElementById('video');
+            canvas = document.getElementById('canvas');
+            ctx = canvas.getContext('2d');
+
+            try {
+                if (currentStream) {
+                    currentStream.getTracks().forEach(track => track.stop());
+                }
+
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { 
+                        width: 640,
+                        height: 480,
+                        facingMode: currentCamera
+                    },
+                    audio: false
+                });
+                
+                currentStream = stream;
+                video.srcObject = stream;
+
+                return new Promise((resolve) => {
+                    video.onloadedmetadata = () => {
+                        canvas.width = video.videoWidth;
+                        canvas.height = video.videoHeight;
+                        resolve();
+                    };
+                });
+            } catch (error) {
+                throw new Error(`Camera access denied: ${error.message}`);
+            }
+        }
+
+        async function switchCamera() {
+            currentCamera = currentCamera === 'environment' ? 'user' : 'environment';
+            try {
+                await setupCamera();
+                if (isDetecting && !isPaused) {
+                    detectFrame();
+                }
+            } catch (error) {
+                updateStatus(`Camera switch failed: ${error.message}`);
+            }
+        }
+
+        function togglePause() {
+            isPaused = !isPaused;
+            document.getElementById('pauseBtn').textContent = isPaused ? 'Resume' : 'Pause';
+            if (!isPaused) {
+                detectFrame();
+            }
+        }
+
+        function updateProgress(percent) {
+            document.getElementById('progressBar').style.width = `${percent}%`;
+        }
+
+        function updateStatus(message) {
+            document.getElementById('loadingStatus').textContent = message;
+            document.getElementById('status').textContent = message;
+        }
+
+        function addDetection(object, confidence) {
+            const detectionsList = document.getElementById('detectionsList');
+            const item = document.createElement('div');
+            item.className = 'detection-item';
+            
+            // Add confidence-based styling
+            if (confidence > 0.8) {
+                item.classList.add('confidence-high');
+            } else if (confidence > 0.6) {
+                item.classList.add('confidence-medium');
+            } else {
+                item.classList.add('confidence-low');
+            }
+
+            item.innerHTML = `
+                <span>${object}</span>
+                <span>${Math.round(confidence * 100)}%</span>
+            `;
+            detectionsList.insertBefore(item, detectionsList.firstChild);
+            
+            // Keep only the last 10 detections
+            while (detectionsList.children.length > 10) {
+                detectionsList.removeChild(detectionsList.lastChild);
+            }
+        }
+
+        function drawBox(box, label, confidence) {
+            const x = box[0];
+            const y = box[1];
+            const width = box[2];
+            const height = box[3];
+
+            // Draw box with animation
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = confidence > 0.8 ? '#4CAF50' : 
+                            confidence > 0.6 ? '#FFC107' : '#F44336';
+            ctx.strokeRect(x, y, width, height);
+
+            // Draw label background
+            ctx.fillStyle = ctx.strokeStyle;
+            const padding = 10;
+            const textWidth = ctx.measureText(`${label} ${Math.round(confidence * 100)}%`).width;
+            ctx.fillRect(x, y - 30, textWidth + padding * 2, 30);
+
+            // Draw label text
+            ctx.fillStyle = '#000000';
+            ctx.font = '18px Arial';
+            ctx.fillText(`${label} ${Math.round(confidence * 100)}%`, x + padding, y - 8);
+        }
+
+        async function startDetection() {
+            isDetecting = true;
+            isPaused = false;
+            document.getElementById('startBtn').disabled = true;
+            document.getElementById('pauseBtn').disabled = false;
+            detectFrame();
+        }
+
+        async function detectFrame() {
+            if (!model || !isDetecting || isPaused) return;
+
+            try {
+                const predictions = await model.detect(video);
+                
+                // Clear canvas
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                // Process each prediction
+                predictions.forEach(prediction => {
+                    if (prediction.score > 0.5) {
+                        drawBox(prediction.bbox, prediction.class, prediction.score);
+                        addDetection(prediction.class, prediction.score);
+                    }
+                });
+
+                // Continue detection
+                requestAnimationFrame(detectFrame);
+            } catch (error) {
+                console.error('Detection error:', error);
+                updateStatus('Detection error - Retrying...');
+                setTimeout(detectFrame, 1000);
+            }
+        }
+
+        async function init() {
+            try {
+                updateStatus('Setting up camera...');
+                updateProgress(20);
+                await setupCamera();
+                
+                updateStatus('Loading AI model...');
+                updateProgress(40);
+                model = await cocoSsd.load({
+                    base: 'mobilenet_v2'
+                });
+                
+                updateProgress(100);
+                updateStatus('Ready! Click Start Detection to begin.');
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('startBtn').disabled = false;
+                
+            } catch (error) {
+                console.error('Initialization error:', error);
+                updateStatus(`Error: ${error.message}`);
+                const errorDiv = document.createElement('div');
+                errorDiv.className = 'error-message';
+                errorDiv.textContent = `Failed to initialize: ${error.message}. Please ensure you've granted camera permissions and try refreshing the page.`;
+                document.querySelector('.controls').appendChild(errorDiv);
+            }
+        }
+
+        // Start the application
+        init();
+    </script>
+</body>
+</html>
